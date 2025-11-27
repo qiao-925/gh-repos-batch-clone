@@ -53,14 +53,14 @@
 - ocr-mcp-service
 
 
-## 工具项目 <!-- 54号高地 -->
+## 工具项目 <!-- 54高地 -->
 - github-repos-manager
 - get_jobs
 - geekgeekrun
 - hugo
 - get_jobs
 
-## 个人 <!-- 60号高地 -->
+## 个人 <!-- 60高地 -->
 - Assemble
 - Inspiration
 - qiao-925
