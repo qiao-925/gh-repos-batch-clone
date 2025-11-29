@@ -5,6 +5,7 @@
 #   bash sync-groups.sh <分组名1> [分组名2] ...
 #   分组名可以是完整名称（如"Go 学习"）或代号（如"597.9"或"597.9高地"）
 #   使用 --list 或 -l 查看所有可用分组
+#   使用 -a 或 --all 同步所有分组
 #
 # 加速配置：
 #   1. 浅克隆：自动启用 --depth 1（只克隆最新提交）
@@ -193,6 +194,24 @@ list_groups() {
         fi
     done < "$CONFIG_FILE"
     print_info "共找到 $group_count 个分组"
+}
+
+# 获取所有分组名称（用于 -a 参数）
+get_all_group_names() {
+    if [ ! -f "$CONFIG_FILE" ]; then
+        return 1
+    fi
+    
+    local group_names=()
+    while IFS= read -r line; do
+        local parsed=$(parse_group_line "$line")
+        if [ -n "$parsed" ]; then
+            IFS='|' read -r group_name alias <<< "$parsed"
+            group_names+=("$group_name")
+        fi
+    done < "$CONFIG_FILE"
+    
+    printf '%s\n' "${group_names[@]}"
 }
 
 # ============================================================================
@@ -695,6 +714,34 @@ main() {
     if [ $# -eq 0 ] || [ "$1" = "--list" ] || [ "$1" = "-l" ]; then
         list_groups
         exit 0
+    fi
+    
+    # 处理 -a 或 --all 参数：同步所有分组
+    if [ "$1" = "-a" ] || [ "$1" = "--all" ]; then
+        print_info "将同步所有分组..."
+        
+        # 读取所有分组名称
+        local all_groups=$(get_all_group_names)
+        if [ -z "$all_groups" ]; then
+            print_error "无法读取分组列表"
+            exit 1
+        fi
+        
+        # 将分组名称转换为数组
+        local groups_array=()
+        while IFS= read -r group; do
+            groups_array+=("$group")
+        done <<< "$all_groups"
+        
+        if [ ${#groups_array[@]} -eq 0 ]; then
+            print_error "配置文件中没有找到任何分组"
+            exit 1
+        fi
+        
+        print_info "找到 ${#groups_array[@]} 个分组"
+        
+        # 替换参数，将 -a 替换为所有分组名
+        set -- "${groups_array[@]}"
     fi
     
     # 2. 检查配置文件
