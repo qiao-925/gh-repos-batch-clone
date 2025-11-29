@@ -20,7 +20,7 @@ retry_repo_sync() {
         *) level_name="重试" ;;
     esac
     
-    echo ""
+    echo "" >&2
     print_info "[$level_name $current_index/$total_count] 重试仓库: $repo_name"
     print_info "  完整仓库名: $repo_full"
     print_info "  分组文件夹: $group_folder"

@@ -104,7 +104,7 @@ sync_group_repos_main() {
     
     print_step "开始同步分组 '$group_name'（共 $total_count 个仓库）..."
     print_info "分组文件夹: $group_folder"
-    echo ""
+    echo "" >&2
     
     # 遍历数组而不是重新读取字符串
     for repo_name in "${repos_array[@]}"; do
@@ -115,7 +115,7 @@ sync_group_repos_main() {
         
         ((current_index++))
         
-        echo ""
+        echo "" >&2
         print_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         print_info "处理仓库 [$current_index/$total_count]: $repo_name"
         print_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -223,10 +223,10 @@ sync_group_repos() {
     
     # 第二层重试：分组完成后，重试失败的仓库
     if [ ${#failed_repos[@]} -gt 0 ]; then
-        echo ""
+        echo "" >&2
         print_step "分组 '$group_name' 同步完成，发现 ${#failed_repos[@]} 个失败的仓库"
         print_info "开始第二层重试（分组级重试）..."
-        echo ""
+        echo "" >&2
         
         # 声明局部数组变量供 batch_retry_repos 使用
         local failed_repos_array=("${failed_repos[@]}")

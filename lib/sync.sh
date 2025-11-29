@@ -167,15 +167,16 @@ update_repo() {
     print_operation_start "Git 拉取操作" "$repo (分支: $branch)"
     local pull_start_time=$(date +%s)
     
-    # 先尝试从 origin 拉取，直接执行让进度自然显示
-    git pull origin "$branch"
+    # 先尝试从 origin 拉取，输出重定向到 stderr 避免被命令替换捕获
+    # 注意：git pull 的进度信息会显示在终端（stderr），但不会被命令替换捕获
+    git pull origin "$branch" >&2
     local pull_exit_code=$?
     
     # 如果从 origin 拉取失败，尝试直接拉取（可能 remote 名称不是 origin）
     if [ $pull_exit_code -ne 0 ]; then
         print_warning "    从 origin 拉取失败，尝试直接拉取..."
         print_command "git pull"
-        git pull
+        git pull >&2
         pull_exit_code=$?
     fi
     
