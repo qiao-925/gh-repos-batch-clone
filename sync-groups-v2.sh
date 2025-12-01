@@ -98,6 +98,24 @@ print_command() {
 # 统计管理函数
 # ============================================
 
+# ============================================
+# 全局缓存变量（性能优化）
+# ============================================
+
+# 仓库名称映射缓存：repo_name -> repo_full (owner/repo)
+declare -gA REPO_FULL_NAME_CACHE
+
+# 配置文件解析缓存
+declare -gA GROUP_REPOS_CACHE        # group_name -> 仓库列表（多行字符串）
+declare -gA GROUP_HIGHLAND_CACHE     # group_name -> 高地编号
+declare -ga ALL_GROUP_NAMES_CACHE    # 所有分组名数组
+declare -g CONFIG_FILE_CACHE_LOADED=0  # 配置文件是否已加载缓存
+
+# 本地仓库缓存
+declare -ga LOCAL_REPOS_CACHE        # 本地仓库完整名称列表
+declare -gA LOCAL_REPOS_MAP          # repo_full -> 1 (快速查找)
+declare -g LOCAL_REPOS_CACHE_LOADED=0  # 本地仓库缓存是否已加载
+
 # 初始化全局统计变量
 init_sync_stats() {
     declare -g SYNC_STATS_SUCCESS=0
@@ -106,6 +124,10 @@ init_sync_stats() {
     declare -g CLEANUP_STATS_DELETE=0
     declare -gA group_folders
     declare -gA group_names
+    
+    # 初始化缓存标记
+    CONFIG_FILE_CACHE_LOADED=0
+    LOCAL_REPOS_CACHE_LOADED=0
 }
 
 # 更新统计信息（简化版）
@@ -147,7 +169,7 @@ record_error() {
 }
 
 # 输出最终统计信息
-# 比较远程和本地差异，生成详细报告
+# 比较远程和本地差异，生成详细报告（使用缓存优化）
 compare_remote_local_diff() {
     local -n failed_logs_ref=$1
     
@@ -157,15 +179,17 @@ compare_remote_local_diff() {
     echo "=================================================="
     echo ""
     
-    # 获取所有应该同步的仓库列表
+    # 确保缓存已加载
+    if [ "$LOCAL_REPOS_CACHE_LOADED" -eq 0 ]; then
+        init_local_repo_cache
+    fi
+    
+    # 获取所有应该同步的仓库列表（使用缓存）
     local expected_repos=()
     declare -A expected_repos_map=()
-    local repo_owner=$(get_github_username)
     
-    # 遍历所有分组，收集应该同步的仓库
-    local all_groups_output=$(get_all_groups_for_sync)
-    local groups_array
-    string_to_array groups_array "$all_groups_output"
+    # 从缓存中获取所有分组名称
+    local groups_array=("${ALL_GROUP_NAMES_CACHE[@]}")
     
     for group_name in "${groups_array[@]}"; do
         local group_repos=$(get_group_repos "$group_name")
@@ -181,7 +205,8 @@ compare_remote_local_diff() {
                 continue
             fi
             
-            local repo_full=$(find_repo_full_name "$repo_name")
+            # 从缓存中查找（无需 API 调用）
+            local repo_full="${REPO_FULL_NAME_CACHE[$repo_name]}"
             if [ -n "$repo_full" ]; then
                 expected_repos+=("$repo_full")
                 expected_repos_map["$repo_full"]=1
@@ -189,26 +214,10 @@ compare_remote_local_diff() {
         done
     done
     
-    # 获取所有本地已存在的仓库
-    local local_repos=()
-    declare -A local_repos_map=()
-    
-    for group_folder in "${!group_folders[@]}"; do
-        if [ -d "$group_folder" ]; then
-            shopt -s nullglob
-            for dir in "$group_folder"/*; do
-                if [ -d "$dir" ] && [ -d "$dir/.git" ]; then
-                    local repo_name=$(basename "$dir")
-                    local repo_full=$(find_repo_full_name "$repo_name")
-                    if [ -n "$repo_full" ]; then
-                        local_repos+=("$repo_full")
-                        local_repos_map["$repo_full"]=1
-                    fi
-                fi
-            done
-            shopt -u nullglob
-        fi
-    done
+    # 使用缓存的本地仓库列表（无需重新扫描）
+    local local_repos=("${LOCAL_REPOS_CACHE[@]}")
+    # 直接使用全局缓存映射（无需重新创建）
+    # LOCAL_REPOS_MAP 已在 init_local_repo_cache 中建立
     
     # 分析差异
     local missing_repos=()      # 应该存在但本地缺失的
@@ -216,8 +225,9 @@ compare_remote_local_diff() {
     local synced_repos=()        # 成功同步的
     
     # 找出缺失的仓库（应该存在但本地没有）
+    # 使用全局缓存映射 LOCAL_REPOS_MAP
     for repo_full in "${expected_repos[@]}"; do
-        if [ -z "${local_repos_map[$repo_full]}" ]; then
+        if [ -z "${LOCAL_REPOS_MAP[$repo_full]}" ]; then
             missing_repos+=("$repo_full")
         else
             synced_repos+=("$repo_full")
@@ -265,7 +275,29 @@ compare_remote_local_diff() {
         print_warning "⚠️  缺失的仓库（$total_missing 个）："
         local index=1
         for repo_full in "${missing_repos[@]}"; do
+            local repo_info=$(get_repo_info "$repo_full")
+            local repo_desc=""
+            local repo_lang=""
+            local repo_stars=""
+            if [ -n "$repo_info" ]; then
+                repo_desc=$(extract_json_field "$repo_info" "description")
+                repo_lang=$(extract_json_field "$repo_info" "language")
+                repo_stars=$(extract_json_number "$repo_info" "stargazerCount")
+            fi
             echo "  [$index] $repo_full"
+            if [ -n "$repo_lang" ] && [ "$repo_lang" != "null" ] && [ -n "$repo_lang" ]; then
+                echo "      语言: $repo_lang"
+            fi
+            if [ -n "$repo_stars" ] && [ "$repo_stars" != "null" ] && [ "$repo_stars" != "0" ]; then
+                echo "      ⭐ Stars: $repo_stars"
+            fi
+            if [ -n "$repo_desc" ] && [ "$repo_desc" != "null" ] && [ -n "$repo_desc" ]; then
+                # 限制描述长度
+                if [ ${#repo_desc} -gt 60 ]; then
+                    repo_desc="${repo_desc:0:57}..."
+                fi
+                echo "      描述: $repo_desc"
+            fi
             ((index++))
         done
         echo ""
@@ -276,7 +308,22 @@ compare_remote_local_diff() {
         print_info "ℹ️  本地多余的仓库（$total_extra 个，不在同步列表中）："
         local index=1
         for repo_full in "${extra_repos[@]}"; do
+            local repo_info=$(get_repo_info "$repo_full")
+            local repo_desc=""
+            local repo_lang=""
+            local repo_stars=""
+            if [ -n "$repo_info" ]; then
+                repo_desc=$(extract_json_field "$repo_info" "description")
+                repo_lang=$(extract_json_field "$repo_info" "language")
+                repo_stars=$(extract_json_number "$repo_info" "stargazerCount")
+            fi
             echo "  [$index] $repo_full"
+            if [ -n "$repo_lang" ] && [ "$repo_lang" != "null" ] && [ -n "$repo_lang" ]; then
+                echo "      语言: $repo_lang"
+            fi
+            if [ -n "$repo_stars" ] && [ "$repo_stars" != "null" ] && [ "$repo_stars" != "0" ]; then
+                echo "      ⭐ Stars: $repo_stars"
+            fi
             ((index++))
         done
         echo ""
@@ -409,65 +456,62 @@ list_groups() {
     done <<< "$all_groups"
 }
 
-# 获取所有分组名称
+# 获取所有分组名称（使用缓存）
 get_all_group_names() {
-    if [ ! -f "$CONFIG_FILE" ]; then
-        return 1
+    # 如果缓存未加载，先加载
+    if [ "$CONFIG_FILE_CACHE_LOADED" -eq 0 ]; then
+        init_config_cache || return 1
     fi
     
-    grep "^## " "$CONFIG_FILE" | sed 's/^## //' | sed 's/ <!--.*//'
+    # 从缓存返回
+    printf '%s\n' "${ALL_GROUP_NAMES_CACHE[@]}"
 }
 
-# 根据输入查找分组名称（支持部分匹配）
+# 根据输入查找分组名称（支持部分匹配）- 使用缓存优化
 find_group_name() {
     local input=$1
-    local all_groups=$(get_all_group_names)
     
-    # 精确匹配
-    if echo "$all_groups" | grep -qFx "$input"; then
-        echo "$input"
-        return 0
+    # 确保缓存已加载
+    if [ "$CONFIG_FILE_CACHE_LOADED" -eq 0 ]; then
+        init_config_cache || return 1
     fi
     
-    # 部分匹配（不区分大小写）
-    local matched=$(echo "$all_groups" | grep -i "$input" | head -n 1)
-    if [ -n "$matched" ]; then
-        echo "$matched"
-        return 0
-    fi
+    # 在一次遍历中完成精确匹配和部分匹配
+    local input_lower=$(echo "$input" | tr '[:upper:]' '[:lower:]')
+    for group_name in "${ALL_GROUP_NAMES_CACHE[@]}"; do
+        # 精确匹配
+        if [ "$group_name" = "$input" ]; then
+            echo "$group_name"
+            return 0
+        fi
+        
+        # 部分匹配（不区分大小写）
+        local group_lower=$(echo "$group_name" | tr '[:upper:]' '[:lower:]')
+        if [[ "$group_lower" == *"$input_lower"* ]]; then
+            echo "$group_name"
+            return 0
+        fi
+    done
     
     return 1
 }
 
-# 获取分组的高地编号
+# 获取分组的高地编号（使用缓存）
 get_group_highland() {
     local group_name=$1
-    if [ ! -f "$CONFIG_FILE" ]; then
-        return 1
+    
+    # 如果缓存未加载，先加载
+    if [ "$CONFIG_FILE_CACHE_LOADED" -eq 0 ]; then
+        init_config_cache || return 1
     fi
     
-    # 查找分组行并提取高地编号
-    local line=$(grep "^## $group_name" "$CONFIG_FILE" | head -n 1)
-    if [ -z "$line" ]; then
-        return 1
+    # 从缓存返回
+    if [ -n "${GROUP_HIGHLAND_CACHE[$group_name]}" ]; then
+        echo "${GROUP_HIGHLAND_CACHE[$group_name]}"
+        return 0
     fi
     
-    # 提取 HTML 注释中的高地编号（支持中文字符）
-    local highland=$(echo "$line" | sed -n 's/.*<!--[[:space:]]*\(.*\)[[:space:]]*-->.*/\1/p')
-    if [ -z "$highland" ]; then
-        return 1
-    fi
-    
-    # 去除首尾空白
-    highland=$(echo "$highland" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    
-    # 如果格式是"数字高地"，自动加上"号"字变成"数字号高地"
-    # 例如：397.8高地 → 397.8号高地，382高地 → 382号高地
-    if echo "$highland" | grep -qE '^[0-9]+\.?[0-9]*高地$'; then
-        highland=$(echo "$highland" | sed 's/高地$/号高地/')
-    fi
-    
-    echo "$highland"
+    return 1
 }
 
 # 获取分组文件夹名称（组名 + 高地编号）
@@ -475,49 +519,172 @@ get_group_folder() {
     local group_name=$1
     local highland=$(get_group_highland "$group_name")
     
+    # 新的目录结构：repos/分组名 (高地编号)
     if [ -n "$highland" ]; then
-        echo "$group_name ($highland)"
+        echo "repos/$group_name ($highland)"
     else
-        echo "$group_name"
+        echo "repos/$group_name"
     fi
 }
 
-# 获取分组下的所有仓库名称
+# 获取分组下的所有仓库名称（使用缓存）
 get_group_repos() {
     local group_name=$1
-    local in_group=false
-    local repos=""
+    
+    # 如果缓存未加载，先加载
+    if [ "$CONFIG_FILE_CACHE_LOADED" -eq 0 ]; then
+        init_config_cache || return 1
+    fi
+    
+    # 从缓存返回
+    if [ -n "${GROUP_REPOS_CACHE[$group_name]}" ]; then
+        echo "${GROUP_REPOS_CACHE[$group_name]}"
+        return 0
+    fi
+    
+    return 1
+}
+
+# ============================================
+# 缓存初始化函数（性能优化）
+# ============================================
+
+# 初始化配置文件缓存（一次性解析配置文件）
+init_config_cache() {
+    if [ "$CONFIG_FILE_CACHE_LOADED" -eq 1 ]; then
+        return 0  # 已加载，直接返回
+    fi
+    
+    if [ ! -f "$CONFIG_FILE" ]; then
+        print_error "配置文件不存在: $CONFIG_FILE"
+        return 1
+    fi
+    
+    print_step "解析配置文件并建立缓存..."
+    local current_group=""
+    local current_highland=""
+    local repos_for_group=""
+    
+    # 清空缓存
+    GROUP_REPOS_CACHE=()
+    GROUP_HIGHLAND_CACHE=()
+    ALL_GROUP_NAMES_CACHE=()
     
     while IFS= read -r line; do
-        # 检查是否是目标分组（支持带高地编号的格式）
-        if echo "$line" | grep -qE "^## $group_name( <!--|$|\s)"; then
-            in_group=true
-            continue
-        fi
-        
-        # 如果遇到下一个分组，停止
-        if echo "$line" | grep -q "^## "; then
-            if [ "$in_group" = true ]; then
-                break
+        # 检查是否是分组标题（使用 bash 模式匹配，比 grep 快）
+        if [[ "$line" =~ ^##[[:space:]] ]]; then
+            # 保存上一个分组
+            if [ -n "$current_group" ]; then
+                GROUP_REPOS_CACHE["$current_group"]="$repos_for_group"
+                if [ -n "$current_highland" ]; then
+                    GROUP_HIGHLAND_CACHE["$current_group"]="$current_highland"
+                fi
+                ALL_GROUP_NAMES_CACHE+=("$current_group")
             fi
-            in_group=false
+            
+            # 解析新分组（合并 sed 操作）
+            current_group=$(echo "$line" | sed -E 's/^## //;s/ <!--.*//')
+            current_highland=$(echo "$line" | sed -En 's/.*<!--[[:space:]]*([^[:space:]].*[^[:space:]])[[:space:]]*-->.*/\1/p')
+            
+            # 处理高地编号格式（使用 bash 模式匹配）
+            if [ -n "$current_highland" ] && [[ "$current_highland" =~ ^[0-9]+\.?[0-9]*高地$ ]]; then
+                current_highland="${current_highland/高地/号高地}"
+            fi
+            
+            repos_for_group=""
             continue
         fi
         
-        # 如果在目标分组内，提取仓库名
-        if [ "$in_group" = true ]; then
-            local repo=$(echo "$line" | sed 's/^[[:space:]]*-[[:space:]]*//' | sed 's/[[:space:]]*$//')
+        # 如果在分组内，提取仓库名
+        if [ -n "$current_group" ]; then
+            # 提取仓库名（合并 sed 操作，优化字符串处理）
+            local repo=$(echo "$line" | sed -E 's/^[[:space:]]*-[[:space:]]*//;s/[[:space:]]*$//')
             if [ -n "$repo" ]; then
-                if [ -z "$repos" ]; then
-                    repos="$repo"
+                # 使用数组存储，最后再 join（更高效）
+                if [ -z "$repos_for_group" ]; then
+                    repos_for_group="$repo"
                 else
-                    repos="$repos"$'\n'"$repo"
+                    repos_for_group="$repos_for_group"$'\n'"$repo"
                 fi
             fi
         fi
     done < "$CONFIG_FILE"
     
-    echo "$repos"
+    # 保存最后一个分组
+    if [ -n "$current_group" ]; then
+        GROUP_REPOS_CACHE["$current_group"]="$repos_for_group"
+        if [ -n "$current_highland" ]; then
+            GROUP_HIGHLAND_CACHE["$current_group"]="$current_highland"
+        fi
+        ALL_GROUP_NAMES_CACHE+=("$current_group")
+    fi
+    
+    CONFIG_FILE_CACHE_LOADED=1
+    print_success "配置文件缓存已建立，共 ${#ALL_GROUP_NAMES_CACHE[@]} 个分组"
+}
+
+# 初始化仓库名称缓存（批量获取所有仓库）
+init_repo_cache() {
+    print_step "批量获取所有远程仓库并建立缓存..."
+    
+    local all_repos=$(gh repo list --limit 1000 --json nameWithOwner --jq '.[].nameWithOwner' 2>/dev/null)
+    
+    if [ $? -ne 0 ]; then
+        print_error "无法获取仓库列表。请确保已登录 GitHub CLI (运行: gh auth login)"
+        return 1
+    fi
+    
+    # 清空缓存
+    REPO_FULL_NAME_CACHE=()
+    
+    # 建立映射：repo_name -> repo_full
+    while IFS= read -r repo_full; do
+        if [ -z "$repo_full" ]; then
+            continue
+        fi
+        local repo_name=$(basename "$repo_full")
+        REPO_FULL_NAME_CACHE["$repo_name"]="$repo_full"
+    done <<< "$all_repos"
+    
+    local repo_count=${#REPO_FULL_NAME_CACHE[@]}
+    print_success "已缓存 $repo_count 个远程仓库"
+}
+
+# 初始化本地仓库缓存（扫描本地所有仓库）
+init_local_repo_cache() {
+    if [ "$LOCAL_REPOS_CACHE_LOADED" -eq 1 ]; then
+        return 0  # 已加载，直接返回
+    fi
+    
+    print_step "扫描本地仓库并建立缓存..."
+    
+    # 清空缓存
+    LOCAL_REPOS_CACHE=()
+    LOCAL_REPOS_MAP=()
+    
+    # 遍历所有分组文件夹
+    for group_folder in "${!group_folders[@]}"; do
+        if [ ! -d "$group_folder" ]; then
+            continue
+        fi
+        
+        shopt -s nullglob
+        for dir in "$group_folder"/*; do
+            if [ -d "$dir" ] && [ -d "$dir/.git" ]; then
+                local repo_name=$(basename "$dir")
+                # 从缓存中查找完整名称
+                if [ -n "${REPO_FULL_NAME_CACHE[$repo_name]}" ]; then
+                    local repo_full="${REPO_FULL_NAME_CACHE[$repo_name]}"
+                    LOCAL_REPOS_CACHE+=("$repo_full")
+                    LOCAL_REPOS_MAP["$repo_full"]=1
+                fi
+            fi
+        done
+        shopt -u nullglob
+    done
+    
+    LOCAL_REPOS_CACHE_LOADED=1
+    print_success "本地仓库缓存已建立，共 ${#LOCAL_REPOS_CACHE[@]} 个仓库"
 }
 
 # ============================================
@@ -568,9 +735,17 @@ fetch_remote_repos() {
     echo "$all_repos"
 }
 
-# 查找仓库的完整名称（owner/repo）
+# 查找仓库的完整名称（owner/repo）- 使用缓存优化
 find_repo_full_name() {
     local repo_name=$1
+    
+    # 先查缓存
+    if [ -n "${REPO_FULL_NAME_CACHE[$repo_name]}" ]; then
+        echo "${REPO_FULL_NAME_CACHE[$repo_name]}"
+        return 0
+    fi
+    
+    # 缓存未命中，尝试通过 API 查找（应该很少发生）
     local repo_owner=$(get_github_username)
     
     if [ -z "$repo_owner" ]; then
@@ -579,6 +754,8 @@ find_repo_full_name() {
     
     local repo_full="$repo_owner/$repo_name"
     if gh repo view "$repo_full" &>/dev/null; then
+        # 缓存结果
+        REPO_FULL_NAME_CACHE["$repo_name"]="$repo_full"
         echo "$repo_full"
         return 0
     else
@@ -590,6 +767,50 @@ find_repo_full_name() {
 # 仓库操作函数：同步和清理
 # ============================================
 
+# 获取仓库详细信息（返回 JSON 字符串）
+get_repo_info() {
+    local repo_full=$1
+    # 使用 gh repo view 获取仓库信息，失败时返回空
+    gh repo view "$repo_full" --json \
+        name,description,language,stargazerCount,forkCount,updatedAt,isArchived,isPrivate 2>/dev/null || echo ""
+}
+
+# 从 JSON 中提取字段值（优化版，直接解析 JSON）
+extract_json_field() {
+    local json=$1
+    local field=$2
+    
+    # 优先使用 jq（如果可用）
+    if command -v jq >/dev/null 2>&1; then
+        echo "$json" | jq -r ".$field // empty" 2>/dev/null && return 0
+    fi
+    
+    # 回退到简单的字符串匹配（提取字符串值）
+    local value=$(echo "$json" | grep -o "\"$field\":\"[^\"]*\"" | sed "s/\"$field\":\"\([^\"]*\)\"/\1/" 2>/dev/null)
+    if [ -n "$value" ]; then
+        echo "$value"
+        return 0
+    fi
+    
+    # 尝试提取 null 或其他值
+    echo "$json" | grep -o "\"$field\":null" >/dev/null 2>&1 && echo "" && return 0
+    
+    echo ""
+}
+
+# 从 JSON 中提取数字字段值（使用简单的字符串处理）
+extract_json_number() {
+    local json=$1
+    local field=$2
+    # 提取数字字段（支持 null 值）
+    local value=$(echo "$json" | grep -o "\"$field\":[0-9]*" | sed "s/\"$field\":\([0-9]*\)/\1/" 2>/dev/null)
+    if [ -z "$value" ]; then
+        echo "0"
+    else
+        echo "$value"
+    fi
+}
+
 # 克隆仓库
 clone_repo() {
     local repo=$1
@@ -598,22 +819,50 @@ clone_repo() {
     local total_sync=$4
     local error_log_ref=${5:-""}
     
+    # 切换到脚本目录，确保相对路径正确
+    cd "$SCRIPT_DIR" || {
+        print_error "  错误: 无法切换到脚本目录: $SCRIPT_DIR"
+        return 1
+    }
+    
     echo "[$current_index/$total_sync] [克隆] $repo -> $(dirname "$repo_path")/..." >&2
     print_info "  正在克隆仓库: $repo"
     print_info "  目标路径: $repo_path"
     
-    local repo_url="https://github.com/$repo.git"
-    print_info "  仓库 URL: $repo_url"
+    # 创建父目录（分组文件夹），确保目录存在
+    local parent_dir=$(dirname "$repo_path")
+    if [ ! -d "$parent_dir" ]; then
+        mkdir -p "$parent_dir"
+        print_info "  已创建分组文件夹: $parent_dir"
+    fi
     
-    # 直接执行 git clone
-    git clone "$repo_url" "$repo_path"
+    # 获取仓库信息（用于显示）
+    local repo_info=$(get_repo_info "$repo")
+    if [ -n "$repo_info" ]; then
+        local repo_desc=$(extract_json_field "$repo_info" "description")
+        local repo_lang=$(extract_json_field "$repo_info" "language")
+        local repo_stars=$(extract_json_number "$repo_info" "stargazerCount")
+        if [ -n "$repo_desc" ] && [ "$repo_desc" != "null" ]; then
+            print_info "  描述: $repo_desc"
+        fi
+        if [ -n "$repo_lang" ] && [ "$repo_lang" != "null" ] && [ "$repo_lang" != "未知" ]; then
+            print_info "  语言: $repo_lang"
+        fi
+        if [ -n "$repo_stars" ] && [ "$repo_stars" != "null" ] && [ "$repo_stars" != "0" ]; then
+            print_info "  ⭐ Stars: $repo_stars"
+        fi
+    fi
+    
+    # 使用 gh repo clone（自动处理协议选择，更好的错误处理）
+    local clone_start_time=$(date +%s)
+    gh repo clone "$repo" "$repo_path" -- --quiet 2>&1
     local clone_exit_code=$?
-    local clone_duration=0
+    local clone_end_time=$(date +%s)
+    local clone_duration=$((clone_end_time - clone_start_time))
     
     # 如果失败，获取错误信息
     local clone_output=""
     if [ "$clone_exit_code" -ne 0 ]; then
-        # 失败时尝试获取错误信息（但可能已经输出到终端了）
         clone_output="克隆失败，退出代码: $clone_exit_code"
     fi
     
@@ -623,11 +872,9 @@ clone_repo() {
         return 0
     else
         echo "✗ 失败（耗时 ${clone_duration}秒）" >&2
-        # 错误信息已经在终端显示了，这里只记录基本错误
         local error_msg="${clone_output:-克隆失败，退出代码: $clone_exit_code}"
         print_error "  克隆失败: $error_msg"
         print_error "  请查看上方的错误信息"
-        # 记录失败日志
         record_error "$error_log_ref" "$repo" "克隆失败" "$error_msg"
         return 1
     fi
@@ -660,30 +907,45 @@ prepare_repo_for_update() {
     echo "$branch|$uncommitted_changes"
 }
 
-# 执行 Git 拉取操作（带重试机制）
-execute_git_pull() {
-    local branch=$1
-    local pull_exit_code=1
+# 执行仓库同步操作（优先使用 gh repo sync，回退到 git pull）
+execute_repo_sync() {
+    local repo_full=$1
+    local repo_path=$2
+    local branch=$3
+    local sync_exit_code=1
     
-    # 尝试拉取（输出重定向到 stderr，避免被 $() 捕获）
-    git pull --no-edit --rebase origin "$branch" >&2
-    pull_exit_code=$?
+    # 检查是否是 fork 仓库（有 upstream remote）
+    local has_upstream=$(cd "$repo_path" && git remote get-url upstream 2>/dev/null || echo "")
     
-    # 如果失败，尝试普通 pull
-    if [ "$pull_exit_code" -ne 0 ]; then
-        [ -f ".git/REBASE_HEAD" ] && git rebase --abort >/dev/null 2>&1
-        git pull --no-edit origin "$branch" >&2
-        pull_exit_code=$?
+    if [ -n "$has_upstream" ]; then
+        # 如果是 fork 仓库，使用 gh repo sync（同步到上游）
+        print_info "    检测到 fork 仓库，使用 gh repo sync 同步到上游..."
+        cd "$repo_path" && gh repo sync --branch "$branch" >&2 2>&1
+        sync_exit_code=$?
     fi
     
-    # 如果还是失败，尝试直接拉取
-    if [ "$pull_exit_code" -ne 0 ]; then
-        [ -f ".git/MERGE_HEAD" ] && git merge --abort >/dev/null 2>&1
-        git pull --no-edit >&2
-        pull_exit_code=$?
+    # 如果不是 fork 或 sync 失败，使用 git pull
+    if [ "$sync_exit_code" -ne 0 ] || [ -z "$has_upstream" ]; then
+        # 尝试拉取（输出重定向到 stderr，避免被 $() 捕获）
+        cd "$repo_path" && git pull --no-edit --rebase origin "$branch" >&2
+        sync_exit_code=$?
+        
+        # 如果失败，尝试普通 pull
+        if [ "$sync_exit_code" -ne 0 ]; then
+            [ -f "$repo_path/.git/REBASE_HEAD" ] && cd "$repo_path" && git rebase --abort >/dev/null 2>&1
+            cd "$repo_path" && git pull --no-edit origin "$branch" >&2
+            sync_exit_code=$?
+        fi
+        
+        # 如果还是失败，尝试直接拉取
+        if [ "$sync_exit_code" -ne 0 ]; then
+            [ -f "$repo_path/.git/MERGE_HEAD" ] && cd "$repo_path" && git merge --abort >/dev/null 2>&1
+            cd "$repo_path" && git pull --no-edit >&2
+            sync_exit_code=$?
+        fi
     fi
     
-    echo "$pull_exit_code"
+    echo "$sync_exit_code"
 }
 
 # 更新已有仓库
@@ -694,6 +956,12 @@ update_repo() {
     local current_index=$4
     local total_sync=$5
     local error_log_ref=${6:-""}
+    
+    # 切换到脚本目录，确保相对路径正确
+    cd "$SCRIPT_DIR" || {
+        print_error "  错误: 无法切换到脚本目录: $SCRIPT_DIR"
+        return 1
+    }
     
     echo -n "[$current_index/$total_sync] [更新] $repo ($group_folder)... " >&2
     print_info "  正在更新仓库: $repo"
@@ -717,8 +985,25 @@ update_repo() {
     local before_hash=$(git rev-parse HEAD 2>/dev/null || echo "")
     local pull_start_time=$(date +%s)
     
-    # 执行拉取
-    local pull_exit_code=$(execute_git_pull "$branch")
+    # 获取仓库信息（用于显示）
+    local repo_info=$(get_repo_info "$repo")
+    if [ -n "$repo_info" ]; then
+        local repo_desc=$(extract_json_field "$repo_info" "description")
+        local repo_lang=$(extract_json_field "$repo_info" "language")
+        local repo_stars=$(extract_json_number "$repo_info" "stargazerCount")
+        if [ -n "$repo_desc" ] && [ "$repo_desc" != "null" ]; then
+            print_info "  描述: $repo_desc"
+        fi
+        if [ -n "$repo_lang" ] && [ "$repo_lang" != "null" ] && [ "$repo_lang" != "未知" ]; then
+            print_info "  语言: $repo_lang"
+        fi
+        if [ -n "$repo_stars" ] && [ "$repo_stars" != "null" ] && [ "$repo_stars" != "0" ]; then
+            print_info "  ⭐ Stars: $repo_stars"
+        fi
+    fi
+    
+    # 执行同步（优先使用 gh repo sync，回退到 git pull）
+    local pull_exit_code=$(execute_repo_sync "$repo" "$repo_path" "$branch")
     
     local pull_end_time=$(date +%s)
     local pull_duration=$((pull_end_time - pull_start_time))
@@ -845,16 +1130,25 @@ cleanup_deleted_repos() {
         # 检查是否在要同步的仓库列表中
         if [ -z "${sync_repos_map_ref[$repo_path]}" ]; then
             # 如果不在要同步的分组中，检查是否在远程还存在
-            if [ -n "$repo_owner" ]; then
-                print_info "  检查远程仓库是否存在: $repo_owner/$repo_name"
-                if gh repo view "$repo_owner/$repo_name" &>/dev/null; then
-                    print_info "  仓库 $repo_name 还在远程，只是不在当前同步的分组中，保留"
-                    continue
-                else
-                    print_warning "  仓库 $repo_name 在远程已不存在"
-                fi
+            # 使用缓存检查，避免 API 调用
+            local repo_full="${REPO_FULL_NAME_CACHE[$repo_name]}"
+            if [ -n "$repo_full" ]; then
+                # 仓库在缓存中存在，说明远程还存在，只是不在当前同步的分组中
+                print_info "  仓库 $repo_name 还在远程，只是不在当前同步的分组中，保留"
+                continue
             else
-                print_warning "  无法检查远程仓库状态，但仓库不在同步列表中"
+                # 不在缓存中，说明远程可能不存在（但可能不在前1000个仓库中，保守处理）
+                print_warning "  仓库 $repo_name 不在仓库列表中（可能已删除或不在前1000个仓库）"
+                # 如果需要精确检查，可以使用 API（但会慢一些）
+                if [ -n "$repo_owner" ]; then
+                    print_info "  检查远程仓库是否存在: $repo_owner/$repo_name"
+                    if gh repo view "$repo_owner/$repo_name" &>/dev/null; then
+                        print_info "  仓库 $repo_name 还在远程，只是不在当前同步的分组中，保留"
+                        continue
+                    else
+                        print_warning "  仓库 $repo_name 在远程已不存在"
+                    fi
+                fi
             fi
             
             # 仓库已不存在，删除
@@ -941,6 +1235,12 @@ initialize_sync() {
     fi
     print_success "配置文件存在: $CONFIG_FILE"
     
+    # 创建 repos 目录（如果不存在）
+    if [ ! -d "repos" ]; then
+        mkdir -p "repos"
+        print_info "已创建 repos 目录"
+    fi
+    
     # 初始化 GitHub 连接
     init_github_connection
     
@@ -954,22 +1254,33 @@ initialize_sync() {
     init_sync_stats
 }
 
-# 构建同步仓库映射（用于清理检查）
+# 构建同步仓库映射（用于清理检查）- 使用缓存优化
 build_sync_repos_map() {
     local -n sync_repos_map_ref=$1
     
-    for group_folder in "${!group_folders[@]}"; do
-        if [ -d "$group_folder" ]; then
-            # 使用 nullglob 处理空目录情况
-            shopt -s nullglob
-            for dir in "$group_folder"/*; do
-                if [ -d "$dir" ] && [ -d "$dir/.git" ]; then
-                    local repo_name=$(basename "$dir")
-                    sync_repos_map_ref["$group_folder/$repo_name"]=1
-                fi
-            done
-            shopt -u nullglob
+    # 从配置文件中的期望同步仓库列表构建映射（无需遍历文件系统）
+    # 遍历所有分组和仓库，构建期望的路径映射
+    local groups_array=("${ALL_GROUP_NAMES_CACHE[@]}")
+    
+    for group_name in "${groups_array[@]}"; do
+        local group_folder=$(get_group_folder "$group_name")
+        local group_repos=$(get_group_repos "$group_name")
+        
+        if [ -z "$group_repos" ]; then
+            continue
         fi
+        
+        local repos_array
+        string_to_array repos_array "$group_repos"
+        
+        for repo_name in "${repos_array[@]}"; do
+            if [ -z "$repo_name" ]; then
+                continue
+            fi
+            
+            local repo_path="$group_folder/$repo_name"
+            sync_repos_map_ref["$repo_path"]=1
+        done
     done
 }
 
@@ -1255,13 +1566,33 @@ scan_global_diff() {
             fi
             
             local repo_path="$group_folder/$repo_name"
+            local old_repo_path="$repo_name"  # 检查根目录下的旧位置
             
-            # 检查仓库是否存在
+            # 检查仓库是否存在（优先检查新位置，再检查旧位置）
             if [ -d "$repo_path/.git" ]; then
-                # 已存在 git 仓库，加入更新列表
+                # 已存在 git 仓库（新位置），加入更新列表
                 group_to_update+=("$repo_full|$repo_name")
                 ((total_to_update++))
                 echo "✅ 已存在 (需更新)" >&2
+            elif [ -d "$old_repo_path/.git" ]; then
+                # 仓库在旧位置（根目录），需要移动到新位置
+                print_info "  检测到仓库在旧位置: $old_repo_path，将移动到新位置: $repo_path"
+                # 创建新位置的分组文件夹
+                local parent_dir=$(dirname "$repo_path")
+                if [ ! -d "$parent_dir" ]; then
+                    mkdir -p "$parent_dir"
+                fi
+                # 移动仓库到新位置
+                if mv "$old_repo_path" "$repo_path" 2>/dev/null; then
+                    group_to_update+=("$repo_full|$repo_name")
+                    ((total_to_update++))
+                    echo "✅ 已移动并加入更新列表" >&2
+                else
+                    # 移动失败，仍然加入更新列表（尝试在新位置更新）
+                    echo "⚠️  移动失败，但仍将尝试更新" >&2
+                    group_to_update+=("$repo_full|$repo_name")
+                    ((total_to_update++))
+                fi
             elif [ -d "$repo_path" ]; then
                 # 目录存在但不是 git 仓库，跳过
                 echo "⚠️  目录存在但非 git 仓库 (跳过)" >&2
@@ -1324,9 +1655,15 @@ scan_global_diff() {
     echo ""
 }
 
-# 执行同步操作（遍历所有分组）
+# 执行同步操作（遍历所有分组）- 支持并行处理
 execute_sync() {
     local groups=("$@")
+    
+    # 并行处理的并发数（默认 5，可通过环境变量 PARALLEL_JOBS 配置）
+    local PARALLEL_JOBS=${PARALLEL_JOBS:-5}
+    print_info "📊 并行处理模式：最多同时处理 $PARALLEL_JOBS 个仓库"
+    print_info "💡 提示：网络带宽越高，并行化效果越好。如遇问题可设置 PARALLEL_JOBS=1 使用串行模式"
+    echo ""
     
     # 记录所有失败的仓库（用于最后统一重试）
     declare -ga all_failed_repos=()
@@ -1349,7 +1686,10 @@ execute_sync() {
         print_info "   缺失的仓库将优先处理，完成后才会更新已存在的仓库"
         echo ""
         
+        # 收集所有需要克隆的仓库信息（用于并行处理）
+        local -a all_clone_tasks=()
         local global_index=0
+        
         for group_folder in "${!global_repos_to_clone[@]}"; do
             local group_name="${group_names[$group_folder]}"
             local repos_list="${global_repos_to_clone[$group_folder]}"
@@ -1361,33 +1701,116 @@ execute_sync() {
             local repos_array
             string_to_array repos_array "$repos_list"
             
-            if [ ${#repos_array[@]} -eq 0 ]; then
-                continue
-            fi
-            
-            print_info "处理分组 '$group_name' 的缺失仓库（${#repos_array[@]} 个）..."
-            
             for repo_info in "${repos_array[@]}"; do
-                IFS='|' read -r repo_full repo_name <<< "$repo_info"
                 ((global_index++))
-                
-                echo "" >&2
-                print_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                print_info "处理仓库 [$global_index/$total_missing_count]: $repo_name [克隆] (分组: $group_name)"
-                print_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                
-                local repo_path="$group_folder/$repo_name"
-                local result
-                clone_repo "$repo_full" "$repo_path" "$global_index" "$total_missing_count" "all_failed_logs"
-                result=$?
-                
-                update_sync_statistics "$repo_path" "$result"
-                
-                if [ "$result" -ne 0 ]; then
-                    all_failed_repos+=("$repo_full|$repo_name|$group_folder")
-                fi
+                # 格式：repo_full|repo_name|group_folder|group_name|global_index
+                IFS='|' read -r repo_full repo_name <<< "$repo_info"
+                all_clone_tasks+=("$repo_full|$repo_name|$group_folder|$group_name|$global_index")
             done
         done
+        
+        # 并行执行克隆任务
+        local active_jobs=0
+        local task_index=0
+        local temp_dir=$(mktemp -d)
+        local -a job_pids=()
+        
+        print_info "开始并行克隆（并发数: $PARALLEL_JOBS）..."
+        echo ""
+        
+        while [ $task_index -lt ${#all_clone_tasks[@]} ] || [ $active_jobs -gt 0 ]; do
+            # 更新活跃任务数（重新计算）
+            active_jobs=0
+            for pid in "${job_pids[@]}"; do
+                if kill -0 "$pid" 2>/dev/null; then
+                    ((active_jobs++))
+                fi
+            done
+            # 启动新任务（如果还有待处理任务且未达到并发限制）
+            while [ $active_jobs -lt $PARALLEL_JOBS ] && [ $task_index -lt ${#all_clone_tasks[@]} ]; do
+                local task_info="${all_clone_tasks[$task_index]}"
+                # 格式：repo_full|repo_name|group_folder|group_name|global_index
+                IFS='|' read -r repo_full repo_name group_folder group_name global_index <<< "$task_info"
+                
+                local repo_path="$group_folder/$repo_name"
+                local log_file="$temp_dir/clone_${task_index}.log"
+                
+                # 后台执行克隆任务（注意：在后台块中需要重新声明变量以确保正确传递）
+                (
+                    # 重新读取变量，确保在子shell中正确传递
+                    local repo_full_var="$repo_full"
+                    local group_folder_var="$group_folder"
+                    local repo_name_var="$repo_name"
+                    local group_name_var="$group_name"
+                    local global_index_var="$global_index"
+                    local total_missing_count_var="$total_missing_count"
+                    
+                    # 在子shell中重新构建路径，确保路径正确
+                    local repo_path_var="$group_folder_var/$repo_name_var"
+                    
+                    echo "[$global_index_var/$total_missing_count_var] 开始克隆: $repo_name_var (分组: $group_name_var)"
+                    echo "  目标路径: $repo_path_var" >> "$log_file"
+                    clone_repo "$repo_full_var" "$repo_path_var" "$global_index_var" "$total_missing_count_var" "all_failed_logs"
+                    local result=$?
+                    echo "result:$result" >> "$log_file"
+                    # 注意：统计更新在并行环境下可能有竞争，最后统一汇总
+                    if [ "$result" -ne 0 ]; then
+                        echo "failed:$repo_full_var|$repo_name_var|$group_folder_var" >> "$log_file"
+                    fi
+                ) >> "$log_file" 2>&1 &
+                
+                local pid=$!
+                job_pids+=($pid)
+                ((active_jobs++))
+                ((task_index++))
+            done
+            
+            # 检查并更新活跃任务数（每次循环重新计算，确保准确）
+            local new_active=0
+            for pid in "${job_pids[@]}"; do
+                if kill -0 "$pid" 2>/dev/null; then
+                    ((new_active++))
+                fi
+            done
+            active_jobs=$new_active
+            
+            # 如果达到并发上限，短暂等待
+            if [ $active_jobs -ge $PARALLEL_JOBS ] && [ $task_index -lt ${#all_clone_tasks[@]} ]; then
+                sleep 0.3
+            fi
+        done
+        
+        # 等待所有任务完成并汇总结果
+        for pid in "${job_pids[@]}"; do
+            wait "$pid" 2>/dev/null || true
+        done
+        
+        # 读取所有日志文件，汇总结果和失败信息
+        for log_file in "$temp_dir"/clone_*.log; do
+            if [ -f "$log_file" ]; then
+                # 输出日志（除了结果行）
+                grep -v "^result:\|^failed:" "$log_file" >&2 || true
+                
+                # 提取结果并更新统计
+                local result=$(grep "^result:" "$log_file" | sed 's/^result://' || echo "1")
+                local file_idx=$(basename "$log_file" | sed -n 's/clone_\([0-9]*\)\.log/\1/p')
+                if [ -n "$file_idx" ] && [ -n "${all_clone_tasks[$file_idx]}" ]; then
+                    local task_info="${all_clone_tasks[$file_idx]}"
+                    # 格式：repo_full|repo_name|group_folder|group_name|global_index
+                    IFS='|' read -r repo_full repo_name group_folder group_name global_index <<< "$task_info"
+                    local repo_path="$group_folder/$repo_name"
+                    update_sync_statistics "$repo_path" "$result"
+                fi
+                
+                # 提取失败信息
+                local failed_info=$(grep "^failed:" "$log_file" | sed 's/^failed://' || echo "")
+                if [ -n "$failed_info" ]; then
+                    all_failed_repos+=("$failed_info")
+                fi
+            fi
+        done
+        
+        rm -rf "$temp_dir"
         
         echo ""
         print_success "所有缺失仓库同步完成（$total_missing_count 个）"
@@ -1405,7 +1828,7 @@ execute_sync() {
         fi
     done
     
-    if [ "$total_update_count" -gt 0 ]; then
+        if [ "$total_update_count" -gt 0 ]; then
         if [ "$total_missing_count" -gt 0 ]; then
             print_step "【第二步】更新所有已存在的仓库（共 $total_update_count 个）..."
             print_info "   所有缺失的仓库已处理完成，开始更新已存在的仓库"
@@ -1414,7 +1837,10 @@ execute_sync() {
         fi
         echo ""
         
+        # 收集所有需要更新的仓库信息（用于并行处理）
+        local -a all_update_tasks=()
         local global_index=0
+        
         for group_folder in "${!global_repos_to_update[@]}"; do
             local group_name="${group_names[$group_folder]}"
             local repos_list="${global_repos_to_update[$group_folder]}"
@@ -1426,33 +1852,105 @@ execute_sync() {
             local repos_array
             string_to_array repos_array "$repos_list"
             
-            if [ ${#repos_array[@]} -eq 0 ]; then
-                continue
-            fi
-            
-            print_info "处理分组 '$group_name' 的更新仓库（${#repos_array[@]} 个）..."
-            
             for repo_info in "${repos_array[@]}"; do
-                IFS='|' read -r repo_full repo_name <<< "$repo_info"
                 ((global_index++))
-                
-                echo "" >&2
-                print_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                print_info "处理仓库 [$global_index/$total_update_count]: $repo_name [更新] (分组: $group_name)"
-                print_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                
-                local repo_path="$group_folder/$repo_name"
-                local result
-                update_repo "$repo_full" "$repo_path" "$group_folder" "$global_index" "$total_update_count" "all_failed_logs"
-                result=$?
-                
-                update_sync_statistics "$repo_path" "$result"
-                
-                if [ "$result" -ne 0 ] && [ "$result" -ne 2 ]; then
-                    all_failed_repos+=("$repo_full|$repo_name|$group_folder")
-                fi
+                # 格式：repo_full|repo_name|group_folder|group_name|global_index
+                IFS='|' read -r repo_full repo_name <<< "$repo_info"
+                all_update_tasks+=("$repo_full|$repo_name|$group_folder|$group_name|$global_index")
             done
         done
+        
+        # 并行执行更新任务
+        local active_jobs=0
+        local task_index=0
+        local temp_dir=$(mktemp -d)
+        local -a job_pids=()
+        
+        print_info "开始并行更新（并发数: $PARALLEL_JOBS）..."
+        echo ""
+        
+        while [ $task_index -lt ${#all_update_tasks[@]} ] || [ $active_jobs -gt 0 ]; do
+            # 启动新任务（如果还有待处理任务且未达到并发限制）
+            while [ $active_jobs -lt $PARALLEL_JOBS ] && [ $task_index -lt ${#all_update_tasks[@]} ]; do
+                local task_info="${all_update_tasks[$task_index]}"
+                # 格式：repo_full|repo_name|group_folder|group_name|global_index
+                IFS='|' read -r repo_full repo_name group_folder group_name global_index <<< "$task_info"
+                
+                local repo_path="$group_folder/$repo_name"
+                local log_file="$temp_dir/update_${task_index}.log"
+                
+                # 后台执行更新任务（注意：在后台块中需要重新声明变量以确保正确传递）
+                (
+                    # 重新读取变量，确保在子shell中正确传递
+                    local repo_full_var="$repo_full"
+                    local repo_path_var="$repo_path"
+                    local group_folder_var="$group_folder"
+                    local repo_name_var="$repo_name"
+                    local group_name_var="$group_name"
+                    local global_index_var="$global_index"
+                    local total_update_count_var="$total_update_count"
+                    
+                    echo "[$global_index_var/$total_update_count_var] 开始更新: $repo_name_var (分组: $group_name_var)"
+                    update_repo "$repo_full_var" "$repo_path_var" "$group_folder_var" "$global_index_var" "$total_update_count_var" "all_failed_logs"
+                    local result=$?
+                    echo "result:$result" >> "$log_file"
+                    if [ "$result" -ne 0 ] && [ "$result" -ne 2 ]; then
+                        echo "failed:$repo_full_var|$repo_name_var|$group_folder_var" >> "$log_file"
+                    fi
+                ) >> "$log_file" 2>&1 &
+                
+                local pid=$!
+                job_pids+=($pid)
+                ((active_jobs++))
+                ((task_index++))
+            done
+            
+            # 检查并更新活跃任务数（每次循环重新计算，确保准确）
+            local new_active=0
+            for pid in "${job_pids[@]}"; do
+                if kill -0 "$pid" 2>/dev/null; then
+                    ((new_active++))
+                fi
+            done
+            active_jobs=$new_active
+            
+            # 如果达到并发上限，短暂等待（让已完成的任务有机会被检测到）
+            if [ $active_jobs -ge $PARALLEL_JOBS ]; then
+                sleep 0.3
+            fi
+        done
+        
+        # 等待所有任务完成并汇总结果
+        for pid in "${job_pids[@]}"; do
+            wait "$pid" 2>/dev/null || true
+        done
+        
+        # 读取所有日志文件，汇总结果和失败信息
+        for log_file in "$temp_dir"/update_*.log; do
+            if [ -f "$log_file" ]; then
+                # 输出日志（除了结果行）
+                grep -v "^result:\|^failed:" "$log_file" >&2 || true
+                
+                # 提取结果并更新统计
+                local result=$(grep "^result:" "$log_file" | sed 's/^result://' || echo "1")
+                local file_idx=$(basename "$log_file" | sed -n 's/update_\([0-9]*\)\.log/\1/p')
+                if [ -n "$file_idx" ] && [ -n "${all_update_tasks[$file_idx]}" ]; then
+                    local task_info="${all_update_tasks[$file_idx]}"
+                    # 格式：repo_full|repo_name|group_folder|group_name|global_index
+                    IFS='|' read -r repo_full repo_name group_folder group_name global_index <<< "$task_info"
+                    local repo_path="$group_folder/$repo_name"
+                    update_sync_statistics "$repo_path" "$result"
+                fi
+                
+                # 提取失败信息
+                local failed_info=$(grep "^failed:" "$log_file" | sed 's/^failed://' || echo "")
+                if [ -n "$failed_info" ]; then
+                    all_failed_repos+=("$failed_info")
+                fi
+            fi
+        done
+        
+        rm -rf "$temp_dir"
         
         echo ""
         print_success "所有已存在仓库更新完成（$total_update_count 个）"
@@ -1508,12 +2006,18 @@ main() {
     # 1. 初始化同步环境
     initialize_sync
     
-    # 2. 列出所有可用分组
+    # 2. 初始化缓存（性能优化：一次性加载所有数据）
     echo ""
+    print_step "初始化缓存系统..."
+    init_config_cache || exit 1
+    init_repo_cache || exit 1
+    echo ""
+    
+    # 3. 列出所有可用分组
     list_groups
     echo ""
     
-    # 3. 获取所有分组用于同步
+    # 4. 获取所有分组用于同步（使用缓存）
     print_info "准备同步所有分组..."
     local all_groups_output=$(get_all_groups_for_sync)
     if [ $? -ne 0 ]; then
@@ -1531,29 +2035,32 @@ main() {
     print_info "找到 ${#groups_array[@]} 个分组，开始同步..."
     echo ""
     
-    # 4. 全局扫描差异，分析所有仓库状态
+    # 5. 全局扫描差异，分析所有仓库状态
     scan_global_diff "${groups_array[@]}"
     
-    # 5. 执行同步（优先处理缺失的仓库，再处理更新的）
+    # 6. 初始化本地仓库缓存（用于后续清理和报告）
+    init_local_repo_cache
+    
+    # 7. 执行同步（优先处理缺失的仓库，再处理更新的）
     execute_sync "${groups_array[@]}"
     
-    # 6. 构建同步仓库映射（用于清理检查）
+    # 8. 构建同步仓库映射（用于清理检查，使用缓存）
     declare -A sync_repos_map
     build_sync_repos_map sync_repos_map
     
-    # 7. 清理删除远程已不存在的本地仓库
+    # 9. 清理删除远程已不存在的本地仓库（使用缓存）
     cleanup_deleted_repos group_folders sync_repos_map
     
-    # 8. 输出最终统计
+    # 10. 输出最终统计
     print_final_summary
     
-    # 9. 显示失败仓库详情
+    # 11. 显示失败仓库详情
     if [ -n "$ALL_FAILED_LOGS_ARRAY" ]; then
         local -n failed_logs=$ALL_FAILED_LOGS_ARRAY
         print_failed_repos_details failed_logs
     fi
     
-    # 10. 比较远程和本地差异，生成详细报告
+    # 12. 比较远程和本地差异，生成详细报告
     if [ -n "$ALL_FAILED_LOGS_ARRAY" ]; then
         local -n failed_logs=$ALL_FAILED_LOGS_ARRAY
         compare_remote_local_diff failed_logs
