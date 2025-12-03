@@ -1,7 +1,7 @@
 ---
 description: "脚本代码全局性自检规范"
 globs:
-  - "main.sh"
+  - "main.py"
 alwaysApply: true
 priority: 1
 ---
@@ -12,7 +12,7 @@ priority: 1
 
 **代码更改后必须进行全局性检查** ⚠️ **极其重要**
 
-每次涉及 `main.sh` 的代码更改后，必须使用 AI Agent 对整个脚本进行全面的全局性分析检查，确保代码质量和正确性。
+每次涉及 `main.py` 的代码更改后，必须使用 AI Agent 对整个脚本进行全面的全局性分析检查，确保代码质量和正确性。
 
 ## 强制要求
 
@@ -25,11 +25,11 @@ priority: 1
 使用 AI Agent 对脚本进行全局性分析，必须检查以下所有项目：
 
 ### 1. 语法和基础检查
-- [ ] 运行语法检查：`bash -n main.sh`（或等效检查）
-- [ ] 运行 Linter 检查：确保无 linter 错误
+- [ ] 运行语法检查：`python -m py_compile main.py`（或使用 `python -m py_compile` 检查所有 Python 文件）
+- [ ] 运行 Linter 检查：确保无 linter 错误（使用 pylint、flake8 或 mypy）
 - [ ] 检查所有引用的变量是否已定义
 - [ ] 检查所有函数调用参数是否正确
-- [ ] 验证所有函数是否正确定义和导出
+- [ ] 验证所有函数是否正确定义和导入
 
 ### 2. 并行化相关检查（如果涉及并行代码）
 - [ ] 检查并行执行块中的变量作用域是否正确
@@ -39,9 +39,9 @@ priority: 1
 - [ ] 确认并行执行不会导致数据竞争或死锁
 
 ### 3. 路径和目录结构检查
-- [ ] 验证所有路径构建是否一致（使用 `get_group_folder()`）
+- [ ] 验证所有路径构建是否一致（使用 `lib/paths.py` 中的路径处理函数）
 - [ ] 检查目录创建逻辑是否正确
-- [ ] 确认相对路径和绝对路径使用正确
+- [ ] 确认相对路径和绝对路径使用正确（使用 `pathlib.Path`）
 - [ ] 验证路径拼接不会导致路径错误
 - [ ] 检查所有文件/目录操作是否安全
 
@@ -82,8 +82,8 @@ priority: 1
 
 ## 检查工具和方法
 
-- 语法检查：`bash -n main.sh`
-- Linter：使用 shellcheck 或其他 shell linter
+- 语法检查：`python -m py_compile main.py` 或 `python -m py_compile lib/*.py`
+- Linter：使用 pylint、flake8、mypy 或其他 Python linter
 - 代码分析：使用 AI Agent 进行语义分析和逻辑检查
 - 手动审查：关键逻辑需要人工审查
 

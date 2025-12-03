@@ -11,3 +11,8 @@ __pycache__/
 *.pyo
 *.pyd
 .Python
+
+# 忽略 Python 包元数据（pip install -e . 自动生成）
+*.egg-info/
+build/
+dist/

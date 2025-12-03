@@ -1,7 +1,7 @@
 ---
 description: "GitHub 仓库同步脚本工作流文档维护规范"
 globs:
-  - "main.sh"
+  - "main.py"
   - "README.md"
 alwaysApply: true
 priority: 1
@@ -15,7 +15,7 @@ priority: 1
 
 ## 强制要求
 
-**任何对 `main.sh` 的修改都必须同步更新 `README.md` 中的"工作流与架构文档"部分**
+**任何对 `main.py` 的修改都必须同步更新 `README.md` 中的"工作流与架构文档"部分**
 
 ## 需要更新工作流文档的情况
 

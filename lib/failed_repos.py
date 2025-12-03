@@ -103,7 +103,7 @@ def save_failed_repos(
         log_warning(f"有 {len(failed_tasks)} 个仓库克隆失败")
         log_info(f"失败列表已保存到: {failed_repos_file}（REPO-GROUPS.md 格式）")
         log_info(f"可以使用以下命令重新执行失败的仓库:")
-        log_info(f"  python main.py -f {failed_repos_file}")
+        log_info(f"  repos clone -f {failed_repos_file}")
     except Exception as e:
         log_warning(f"保存失败列表失败: {failed_repos_file} - {e}")
 

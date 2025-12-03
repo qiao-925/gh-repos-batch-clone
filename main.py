@@ -112,9 +112,12 @@ def main() -> int:
         except Exception:
             pass  # 忽略删除失败
     
-    # 方案3：只检查模式（不克隆）
-    if args.check_only:
-        log_info("只检查模式：检查已存在的仓库")
+    # 根据命令执行不同逻辑
+    command = args.command if hasattr(args, 'command') and args.command else 'clone'
+    
+    if command == 'check':
+        # check 命令：只检查模式
+        log_info("检查模式：检查已存在的仓库")
         success_count, fail_count, failed_tasks = check_repos_parallel(
             tasks,
             parallel_tasks=args.tasks,
@@ -129,46 +132,53 @@ def main() -> int:
         print_summary(total_repos, success_count, fail_count, start_time)
         return 1 if fail_count > 0 else 0
     
-    # 正常克隆流程
-    success_count, fail_count, failed_tasks = execute_parallel_clone(
-        tasks,
-        args.tasks,
-        args.connections
-    )
-    
-    # 方案2：所有克隆完成后统一检查
-    if success_count > 0:
-        log_info("开始检查克隆成功的仓库...")
+    elif command == 'clone':
+        # clone 命令：正常克隆流程
+        # 确保 connections 参数存在（向后兼容）
+        connections = getattr(args, 'connections', 8)
         
-        # 获取所有成功克隆的仓库任务（排除克隆失败的）
-        successful_tasks = [
-            task for task in tasks 
-            if task not in failed_tasks
-        ]
-        
-        # 并行检查所有成功克隆的仓库
-        check_success, check_fail, check_failed_tasks = check_repos_parallel(
-            successful_tasks,
-            parallel_tasks=args.tasks,
-            timeout=30
+        success_count, fail_count, failed_tasks = execute_parallel_clone(
+            tasks,
+            args.tasks,
+            connections
         )
         
-        # 将检查失败的仓库也加入失败列表
-        if check_failed_tasks:
-            log_warning(f"发现 {len(check_failed_tasks)} 个仓库检查失败")
-            failed_tasks.extend(check_failed_tasks)
-            fail_count += len(check_failed_tasks)
-            success_count -= len(check_failed_tasks)
-    
-    # 保存失败列表（如果有失败的仓库）
-    if failed_tasks:
-        save_failed_repos(failed_tasks, FAILED_REPOS_FILE, REPO_OWNER or "qiao-925")
-    
-    # 输出统计
-    print_summary(total_repos, success_count, fail_count, start_time)
-    
-    # 返回退出码
-    return 1 if fail_count > 0 else 0
+        # 方案2：所有克隆完成后统一检查
+        if success_count > 0:
+            log_info("开始检查克隆成功的仓库...")
+            
+            # 获取所有成功克隆的仓库任务（排除克隆失败的）
+            successful_tasks = [
+                task for task in tasks 
+                if task not in failed_tasks
+            ]
+            
+            # 并行检查所有成功克隆的仓库
+            check_success, check_fail, check_failed_tasks = check_repos_parallel(
+                successful_tasks,
+                parallel_tasks=args.tasks,
+                timeout=30
+            )
+            
+            # 将检查失败的仓库也加入失败列表
+            if check_failed_tasks:
+                log_warning(f"发现 {len(check_failed_tasks)} 个仓库检查失败")
+                failed_tasks.extend(check_failed_tasks)
+                fail_count += len(check_failed_tasks)
+                success_count -= len(check_failed_tasks)
+        
+        # 保存失败列表（如果有失败的仓库）
+        if failed_tasks:
+            save_failed_repos(failed_tasks, FAILED_REPOS_FILE, REPO_OWNER or "qiao-925")
+        
+        # 输出统计
+        print_summary(total_repos, success_count, fail_count, start_time)
+        
+        # 返回退出码
+        return 1 if fail_count > 0 else 0
+    else:
+        log_error(f"未知命令: {command}")
+        return 1
 
 
 if __name__ == '__main__':

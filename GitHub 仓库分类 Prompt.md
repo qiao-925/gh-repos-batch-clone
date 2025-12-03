@@ -30,12 +30,14 @@
 **同步分组**
 ```bash
 # 批量同步所有分组（推荐）
-python main.py
+repos
+repos clone
 
 # 查看帮助信息
-python main.py --help
+repos --help
+repos clone --help
 
 # 配置并行参数（可选）
-python main.py -t 10 -c 16  # 并行任务数 10，并行传输数 16
+repos clone -t 10 -c 16  # 并行任务数 10，并行传输数 16
 ```
 

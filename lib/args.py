@@ -31,18 +31,19 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  %(prog)s                        # 使用默认参数，从 REPO-GROUPS.md 解析所有仓库
-  %(prog)s -t 10 -c 16            # 并行任务数 10，并行传输数 16
-  %(prog)s -f failed-repos.txt    # 从失败列表文件重新执行失败的仓库
-  %(prog)s --check-only           # 只检查已存在的仓库，不执行克隆
-  %(prog)s -f failed-repos.txt --check-only  # 检查失败列表中的仓库
+  %(prog)s                        # 默认执行 clone 命令
+  %(prog)s clone                   # 克隆仓库
+  %(prog)s clone -t 10 -c 16      # 并行任务数 10，并行传输数 16
+  %(prog)s clone -f failed-repos.txt  # 从失败列表文件重新执行失败的仓库
+  %(prog)s check                   # 检查已存在的仓库
+  %(prog)s check -f failed-repos.txt  # 检查失败列表中的仓库
 
 任务列表文件格式（REPO-GROUPS.md 格式）:
   # GitHub 仓库分组
   
   仓库所有者: owner
   
-  ## 分组名 <!-- 高地编号 -->
+  ## 分组名 <!-- 主题标签 -->
   - 仓库名1
   - 仓库名2
 
@@ -50,7 +51,28 @@ def parse_args() -> argparse.Namespace:
         """
     )
     
-    parser.add_argument(
+    # 创建子命令
+    subparsers = parser.add_subparsers(
+        dest='command',
+        help='可用命令',
+        metavar='COMMAND'
+    )
+    
+    # clone 子命令
+    clone_parser = subparsers.add_parser(
+        'clone',
+        help='克隆仓库',
+        description='批量克隆 GitHub 仓库',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  %(prog)s clone                   # 使用默认参数，从 REPO-GROUPS.md 解析所有仓库
+  %(prog)s clone -t 10 -c 16      # 并行任务数 10，并行传输数 16
+  %(prog)s clone -f failed-repos.txt  # 从失败列表文件重新执行失败的仓库
+        """
+    )
+    
+    clone_parser.add_argument(
         '-t', '--tasks',
         type=validate_positive_int,
         default=5,
@@ -58,7 +80,7 @@ def parse_args() -> argparse.Namespace:
         help='并行任务数（同时克隆的仓库数量，默认: 5）'
     )
     
-    parser.add_argument(
+    clone_parser.add_argument(
         '-c', '--connections',
         type=validate_positive_int,
         default=8,
@@ -66,7 +88,7 @@ def parse_args() -> argparse.Namespace:
         help='并行传输数（每个仓库的 Git 连接数，默认: 8）'
     )
     
-    parser.add_argument(
+    clone_parser.add_argument(
         '-f', '--file',
         type=str,
         default=None,
@@ -74,13 +96,59 @@ def parse_args() -> argparse.Namespace:
         help='指定任务列表文件（REPO-GROUPS.md 格式）。如果不指定，默认从 REPO-GROUPS.md 解析'
     )
     
-    parser.add_argument(
-        '--check-only',
-        action='store_true',
-        help='只检查已存在的仓库，不执行克隆'
+    # check 子命令
+    check_parser = subparsers.add_parser(
+        'check',
+        help='检查仓库完整性',
+        description='检查已存在的仓库完整性（使用 git fsck）',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  %(prog)s check                   # 检查所有仓库（从 REPO-GROUPS.md 解析）
+  %(prog)s check -f failed-repos.txt  # 检查失败列表中的仓库
+  %(prog)s check -t 10            # 使用 10 个并行任务检查
+        """
     )
     
-    args = parser.parse_args()
+    check_parser.add_argument(
+        '-t', '--tasks',
+        type=validate_positive_int,
+        default=5,
+        metavar='NUM',
+        help='并行任务数（同时检查的仓库数量，默认: 5）'
+    )
+    
+    check_parser.add_argument(
+        '-f', '--file',
+        type=str,
+        default=None,
+        metavar='FILE',
+        help='指定任务列表文件（REPO-GROUPS.md 格式）。如果不指定，默认从 REPO-GROUPS.md 解析'
+    )
+    
+    # 使用 parse_known_args 来检查是否有未解析的参数
+    args, remaining = parser.parse_known_args()
+    
+    # 如果没有指定子命令，默认设置为 clone（向后兼容）
+    if not args.command:
+        args.command = 'clone'
+        # 如果有剩余参数，用 clone_parser 重新解析
+        if remaining:
+            try:
+                clone_args = clone_parser.parse_args(remaining)
+                args.tasks = clone_args.tasks
+                args.connections = clone_args.connections
+                args.file = clone_args.file
+            except SystemExit:
+                # 如果解析失败，使用默认值
+                args.tasks = 5
+                args.connections = 8
+                args.file = None
+        else:
+            # 没有参数，使用默认值
+            args.tasks = 5
+            args.connections = 8
+            args.file = None
     
     # 验证文件参数（如果提供）
     if args.file is not None:
