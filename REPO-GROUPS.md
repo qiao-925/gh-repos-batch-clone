@@ -28,6 +28,7 @@
 - toBeBetterJavaer
 - hippo4j
 - xxl-job
+- elasticsearch
 - elasticsearch-in-action
 - hmily
 - drools-in-action
@@ -44,20 +45,17 @@
 - rag-in-action
 - Building-Data-Driven-Applications-with-LlamaIndex
 - ocr-mcp-service
-- repo-content-classification
 
 ## Tools <!-- 可达鸭 -->
 - gh-repos-batch-clone
 - get_jobs
 - geekgeekrun
 - hugo
+- mattermost
 - examples
-- linux-mint-recovery
-- doc-libs
 
 ## Daily <!-- 妙蛙种子 -->
 - Assemble
 - Inspiration
 - qiao-925
 - Resume
-- Void
